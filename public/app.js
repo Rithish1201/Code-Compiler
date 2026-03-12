@@ -197,7 +197,6 @@ let currentLanguage = 'c';
 let editor = null;
 let fontSize = 14;
 let isRunning = false;
-let ws = null;
 
 // ── Initialize Monaco Editor ─────────────────────────────────────────────────
 require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } });
@@ -311,7 +310,6 @@ document.querySelectorAll('.template-btn').forEach(btn => {
 
 // ── Interactive Console Output ───────────────────────────────────────────────
 const consoleEl = document.getElementById('outputText');
-const consoleInput = document.getElementById('consoleInput');
 
 function appendToConsole(text, className = '') {
     const span = document.createElement('span');
@@ -326,8 +324,8 @@ function clearConsole() {
     consoleEl.innerHTML = '';
 }
 
-// ── Run Code (Interactive WebSocket) ─────────────────────────────────────────
-function runCode() {
+// ── Run Code (HTTP-based for Vercel) ─────────────────────────────────────────
+async function runCode() {
     if (isRunning) return;
     if (!editor) return;
 
@@ -342,104 +340,60 @@ function runCode() {
     toggleStopButton(true);
     switchTab('output');
 
-    // Clear output and show console input
     clearConsole();
     document.getElementById('execTime').style.display = 'none';
-    consoleInput.style.display = 'block';
-    consoleInput.value = '';
-    consoleInput.focus();
+    appendToConsole('Compiling & Running...\n', 'output-status');
 
-    // Open WebSocket
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${location.host}`);
+    try {
+        const response = await fetch('/api/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                language: currentLanguage,
+                code: code,
+                input: document.getElementById('stdinInput').value
+            })
+        });
 
-    ws.onopen = () => {
-        ws.send(JSON.stringify({
-            type: 'run',
-            language: currentLanguage,
-            code: code
-        }));
-    };
+        const result = await response.json();
+        clearConsole();
 
-    ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-
-        switch (msg.type) {
-            case 'stdout':
-                appendToConsole(msg.data, 'output-success');
-                break;
-            case 'stderr':
-                appendToConsole(msg.data, 'output-error');
-                break;
-            case 'error':
-                appendToConsole(msg.data + '\n', 'output-error');
-                break;
-            case 'status':
-                appendToConsole(msg.data + '\n', 'output-status');
-                break;
-            case 'exit':
-                const exitCode = msg.code || 0;
-                const time = msg.time || 0;
-                appendToConsole(`\n--- Program exited with code ${exitCode} ---\n`, 'output-status');
-
-                // Show execution time
-                if (time > 0) {
-                    const execTimeEl = document.getElementById('execTime');
-                    const execTimeValueEl = document.getElementById('execTimeValue');
-                    execTimeEl.style.display = 'flex';
-                    execTimeValueEl.textContent = time < 1000 ? `${time}ms` : `${(time / 1000).toFixed(2)}s`;
-                    execTimeEl.style.borderColor = exitCode === 0 ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)';
-                    execTimeEl.style.background = exitCode === 0 ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)';
-                    execTimeEl.style.color = exitCode === 0 ? 'var(--success)' : 'var(--error)';
-                }
-
-                finishRun();
-                break;
-            case 'stopped':
-                appendToConsole('\n⛔ Execution stopped by user.\n', 'output-error');
-                finishRun();
-                break;
+        if (result.output) {
+            appendToConsole(result.output, 'output-success');
         }
-    };
-
-    ws.onerror = () => {
-        appendToConsole('❌ Connection error. Is the server running?\n', 'output-error');
-        finishRun();
-    };
-
-    ws.onclose = () => {
-        if (isRunning) finishRun();
-    };
-}
-
-function finishRun() {
-    isRunning = false;
-    ws = null;
-    setStatus('ready');
-    toggleStopButton(false);
-    consoleInput.style.display = 'none';
-}
-
-// ── Console Input Handler (send stdin to running process) ────────────────────
-consoleInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        const input = consoleInput.value;
-        // Show what user typed in the console (like a real terminal)
-        appendToConsole(input + '\n', 'output-input');
-        // Send to server
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'stdin', data: input }));
+        if (result.error) {
+            appendToConsole(result.error, 'output-error');
         }
-        consoleInput.value = '';
+        if (!result.output && !result.error) {
+            appendToConsole('Program executed with no output.', 'output-status');
+        }
+
+        // Show execution time
+        if (result.executionTime > 0) {
+            const execTimeEl = document.getElementById('execTime');
+            const execTimeValueEl = document.getElementById('execTimeValue');
+            execTimeEl.style.display = 'flex';
+            execTimeValueEl.textContent = result.executionTime < 1000
+                ? `${result.executionTime}ms`
+                : `${(result.executionTime / 1000).toFixed(2)}s`;
+            const hasError = result.error && !result.output;
+            execTimeEl.style.borderColor = hasError ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)';
+            execTimeEl.style.background = hasError ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)';
+            execTimeEl.style.color = hasError ? 'var(--error)' : 'var(--success)';
+        }
+    } catch (err) {
+        clearConsole();
+        appendToConsole('❌ Connection error: ' + err.message, 'output-error');
+    } finally {
+        isRunning = false;
+        setStatus('ready');
+        toggleStopButton(false);
     }
-});
+}
 
 // ── Stop Execution ───────────────────────────────────────────────────────────
 function stopExecution() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'stop' }));
-    }
+    showToast('Execution will complete on the server', 'info');
 }
 
 // ── Debug Code (still uses HTTP) ─────────────────────────────────────────────
