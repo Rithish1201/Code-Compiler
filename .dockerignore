@@ -1,0 +1,9 @@
+node_modules/
+package-lock.json
+*.exe
+*.out
+*.o
+.env
+.DS_Store
+Thumbs.db
+.git
